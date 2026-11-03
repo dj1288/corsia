@@ -30,6 +30,7 @@ from events.identity import (
 from events.connectors.github_artifacts import pr_artifact_in_result
 from events.connectors.github_label_events import IDENTITY, change_event
 from events.connectors.github_ownership import declaration_facts
+from events.connectors.github_pr_facts import FACT_NAMES as _PR_FACTS, pull_facts
 from events.connectors.github_observe_rules import GITHUB_OBSERVE_RULES
 from events.connectors.github_content_facts import content_facts, content_kind, repository_name
 from events.connectors.github_receiver import GITHUB_RECEIVER
@@ -42,12 +43,10 @@ PrEnd = Literal["merged", "closed"]
 """How a closed pull request ended — the whole vocabulary of a PR terminal state."""
 
 PR_MERGED_KEY = "merged"
-"""The one GitHub field that decides a PR's end. Named here so no consumer
-spells it out again; a rename moves the rule, the classifier and the tests."""
+"""The one GitHub field that decides a PR's end, named once for every consumer."""
 
-# The connector owns the names its manifest declares for routed GitHub events.
-# The webhook mapper (events/github_mapper.py) imports these values when it maps
-# payloads, so a declaration cannot silently name an event the mapper never emits.
+# The connector owns the names its manifest declares for routed GitHub events; the
+# webhook mapper (events/github_mapper.py) imports them, so none names an event it never emits.
 GITHUB_ROUTED_EVENTS = {
     "pr.opened": "webhook.github.pr_opened",
     "pr.synchronize": "webhook.github.pr_synchronize",
@@ -157,6 +156,7 @@ def _extract_facts(raw: dict[str, Any], resolved: Mapping[str, Any] | None = Non
             "merged": pr.get("merged"),
             "branch": (pr.get("base") or {}).get("ref"),
             "sha": (pr.get("head") or {}).get("sha"), "author": user.get("login"),
+            **pull_facts(pr),
         })
     kind = "pull_request" if pr else "issues" if raw.get("issue") else None
     change = change_event(kind, raw) if kind else None
@@ -258,13 +258,13 @@ def _repository_projects(repository: str) -> frozenset[str] | None:
         return None
 
 
-_PR_FILTERABLE = ("repo", "branch", "sha", "pr_number", "author", "author_origin", "item_version")
-# A label change adds the one name changed, the item's names after it, who did it and when.
-_PR_LABEL_FILTERABLE = (*_PR_FILTERABLE, "label", "labels", "actor", "at")
+_PR_FILTERABLE = ("repo", "branch", "sha", "pr_number", "author", "author_origin", "item_version", *_PR_FACTS)
+# A label change adds the one name changed, who did it and when.
+_PR_LABEL_FILTERABLE = (*_PR_FILTERABLE, "label", "actor", "at")
 _ISSUE_FILTERABLE = ("repo", "issue_number", "label", "labels", "actor", "at",
                      "minutes_since_opened", "state_reason", "author", "author_origin", "item_version")
 _CONTENT_FILTERABLE = ("repo", "author", "author_origin", "item_version")
-_HEAD_CHECKS_FILTERABLE = ("repo", "head_sha", "head_branch", "pr_number", "conclusion")
+_HEAD_CHECKS_FILTERABLE = ("repo", "head_branch", "pr_number", "conclusion", *_PR_FACTS)
 _CHECK_FILTERABLE = ("repo", "branch", "head_sha", "check_suite_id", "conclusion")
 
 MANIFEST = register(ConnectorManifest(

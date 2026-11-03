@@ -47,7 +47,6 @@ async def test_cancelled_suite_uses_payload_pr_without_lookup(monkeypatch):
 
     monkeypatch.setattr(gh_helpers, "get_prs_for_sha", forbidden)
     monkeypatch.setenv("CORSIA_TEST_MODE", "0")
-    monkeypatch.setenv(checks.ENABLE_ENV, "1")
     monkeypatch.setattr(router, "emit_product_event", lambda *_args, **_kwargs: None)
     agg = checks.HeadCheckAggregator(lambda *_a, **_kw: None, checks.IntakeSink(), sleep=lambda _: asyncio.Event().wait())
     monkeypatch.setattr(checks, "_default", agg)

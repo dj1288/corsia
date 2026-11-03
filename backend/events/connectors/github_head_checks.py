@@ -4,7 +4,7 @@ This module owns only the connector-side aggregation.  It deliberately has no
 router dependency: the injected sink is the generic event intake (``admit_event``,
 origin ``connector``), and ``event_id`` comes from the head's check suites, never
 from a delivery.  Its reads pass the repo-activity poller's budget and backoff
-gate, and the admission hook stays off unless explicitly enabled.
+gate. A suite held for approval (no runs, ``action_required``) is a settled head too.
 """
 from __future__ import annotations
 
@@ -17,12 +17,12 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol
 
 from events.connectors import github_notifications_feed as feed
+from events.connectors import github_pr_facts as pr_facts
 from events.connectors import github_repo_activity as poller
 
 log = logging.getLogger(__name__)
 DEBOUNCE_SECONDS = 30
 MAX_ATTEMPTS = 4
-ENABLE_ENV = "CORSIA_GITHUB_HEAD_CHECKS_ENABLE"
 
 
 class Refusal(Protocol):
@@ -72,7 +72,7 @@ def _current_suites(body: Any) -> list[dict[str, Any]]:
     """REST suites have independent identities, even when they share an app.
 
     The REST shape names no workflow; a re-run reuses the suite and moves its
-    ``updated_at``. Only suites with runs must complete before the head settles.
+    ``updated_at``. Only suites with runs, or held for approval, must complete before the head settles.
     """
     return [suite for suite in _object(body).get("check_suites", []) if isinstance(suite, dict)]
 
@@ -126,8 +126,9 @@ class HeadCheckAggregator:
             for attempt in range(1, MAX_ATTEMPTS + 1):
                 await self.sleep(DEBOUNCE_SECONDS * attempt)
                 try:
-                    response, reason = await poller.gated_read(
-                        self.runner, repo, f"repos/{repo}/commits/{head_sha}/check-suites")
+                    # Shielded: a newer suite cancels this task, but the request that went out is still counted.
+                    response, reason = await asyncio.shield(poller.gated_read(
+                        self.runner, repo, f"repos/{repo}/commits/{head_sha}/check-suites"))
                 except Exception:
                     log.warning("github-head-checks: aggregate read failed for %s@%s", *key, exc_info=True)
                     return
@@ -141,19 +142,28 @@ class HeadCheckAggregator:
                 return
             assert response is not None
             latest = _current_suites(response.body)
-            latest = [suite for suite in latest if (suite.get("latest_check_runs_count") or 0) > 0]
+            latest = [suite for suite in latest if (suite.get("latest_check_runs_count") or 0) > 0
+                      or suite.get("conclusion") == "action_required"]
             incomplete = sum(suite.get("status") != "completed" for suite in latest)
             if not latest or incomplete:
                 log.info("github-head-checks: head %s@%s incomplete suites=%s", *key, incomplete)
                 return
             branch, pr_number = self._facts.get(key, (None, None))
-            facts: dict[str, Any] = {"repo": repo, "head_sha": head_sha, "conclusion": _conclusion(latest)}
+            conclusion = _conclusion(latest)
+            facts: dict[str, Any] = {"repo": repo, "head_sha": head_sha, "trigger_head": head_sha,
+                                     "conclusion": conclusion}
             if branch is not None:
                 facts["head_branch"] = branch
             if pr_number is not None:
                 facts["pr_number"] = pr_number
-            result = await self.sink.admit_event(event_type="github.head.checks_completed", facts=facts,
-                origin="connector", producer="github", event_id=_event_id(repo, head_sha, latest))
+            facts = await pr_facts.current_facts(self.runner, repo, pr_number, facts,
+                                                 held=conclusion == "action_required")
+            try:
+                result = await self.sink.admit_event(event_type="github.head.checks_completed", facts=facts,
+                    origin="connector", producer="github", event_id=_event_id(repo, head_sha, latest))
+            except Exception:
+                log.warning("github-head-checks: intake failed for %s@%s", *key, exc_info=True)
+                return
             if result.refusal is not None:
                 log.info("github-head-checks: intake refused %s@%s code=%s", *key, result.refusal.code)
         finally:
@@ -166,10 +176,8 @@ _default: HeadCheckAggregator | None = None
 
 
 def hook_disabled_reason() -> str | None:
-    """Off by default and in test mode, independently of the poller switch."""
-    if os.environ.get("CORSIA_TEST_MODE") == "1":
-        return "test_mode"
-    return None if os.environ.get(ENABLE_ENV) == "1" else "not_enabled"
+    """Off only in test mode."""
+    return "test_mode" if os.environ.get("CORSIA_TEST_MODE") == "1" else None
 
 
 def observe_admitted_check_suite(payload: dict[str, Any], selected_pr: dict[str, Any] | None = None) -> None:

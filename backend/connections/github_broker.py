@@ -35,9 +35,16 @@ def _scrub(text: str) -> str:
 
 
 def _run_gh(args: list[str], *, timeout: float) -> subprocess.CompletedProcess:
+    """Run the vetted read as the agents' GitHub account when there is one, as the host's ``gh`` otherwise."""
+    from connections import github_agent
+
+    account = github_agent.view()
+    if account.cause == "verifying":  # first read after a restart: wait for the answer once
+        account = github_agent.verify_now()
+    binary, env = github_agent.backend_gh(account)
     return subprocess.run(
-        ["gh", *args], capture_output=True, text=True, timeout=timeout, check=False,
-        env={**os.environ, "GH_HOST": GH_HOST},
+        [binary, *args], capture_output=True, text=True, timeout=timeout, check=False,
+        env={**(os.environ if env is None else env), "GH_HOST": GH_HOST},
     )
 
 
