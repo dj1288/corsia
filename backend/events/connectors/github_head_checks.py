@@ -78,6 +78,7 @@ def _current_suites(body: Any) -> list[dict[str, Any]]:
 
 
 def _conclusion(suites: list[dict[str, Any]]) -> str:
+    """The head's outcome: anything not green counts, unlike the router's narrower set of failures to wake on."""
     values = [str(suite.get("conclusion") or "failure") for suite in suites]
     failures = ("timed_out", "action_required", "startup_failure", "stale", "failure")
     for value in failures:
