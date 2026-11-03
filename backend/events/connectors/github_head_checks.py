@@ -6,10 +6,9 @@ origin ``connector``), and ``event_id`` comes from the head's check suites, neve
 from a delivery.  Its reads pass the repo-activity poller's budget and backoff
 gate. A suite held for approval (no runs, ``action_required``) is a settled head too.
 
-The event carries two outcome facts for its head. ``conclusion`` is the suites'
-combined conclusion for the settled head, as it was before ``check_state``.
-``check_state`` is the per-run state of event-rules design §7.1, which Quality
-Gate's ``evaluate`` decides on.
+The head's outcome is ``check_state`` (event-rules design §7.1), the one state
+``github_pr_facts`` computes for every event kind from these same suites and the
+head's check runs.
 """
 from __future__ import annotations
 
@@ -82,18 +81,6 @@ def _current_suites(body: Any) -> list[dict[str, Any]]:
     return [suite for suite in _object(body).get("check_suites", []) if isinstance(suite, dict)]
 
 
-def _conclusion(suites: list[dict[str, Any]]) -> str:
-    """The head's outcome: anything not green counts, unlike the router's narrower set of failures to wake on."""
-    values = [str(suite.get("conclusion") or "failure") for suite in suites]
-    failures = ("timed_out", "action_required", "startup_failure", "stale", "failure")
-    for value in failures:
-        if value in values:
-            return value
-    if "cancelled" in values:
-        return "cancelled"
-    return "success"
-
-
 def _event_id(repo: str, head_sha: str, suites: list[dict[str, Any]]) -> str:
     pairs = sorted((str(suite.get("id")), str(suite.get("updated_at") or "")) for suite in suites)
     encoded = json.dumps([repo, head_sha, pairs], separators=(",", ":"), sort_keys=True)
@@ -147,23 +134,18 @@ class HeadCheckAggregator:
                 log.warning("github-head-checks: aggregate read dropped after retries for %s@%s", *key)
                 return
             assert response is not None
-            latest = _current_suites(response.body)
-            latest = [suite for suite in latest if (suite.get("latest_check_runs_count") or 0) > 0
-                      or suite.get("conclusion") == "action_required"]
+            latest = pr_facts.counted_suites(_current_suites(response.body))
             incomplete = sum(suite.get("status") != "completed" for suite in latest)
             if not latest or incomplete:
                 log.info("github-head-checks: head %s@%s incomplete suites=%s", *key, incomplete)
                 return
             branch, pr_number = self._facts.get(key, (None, None))
-            conclusion = _conclusion(latest)
-            facts: dict[str, Any] = {"repo": repo, "head_sha": head_sha, "trigger_head": head_sha,
-                                     "conclusion": conclusion}
+            facts: dict[str, Any] = {"repo": repo, "head_sha": head_sha, "trigger_head": head_sha}
             if branch is not None:
                 facts["head_branch"] = branch
             if pr_number is not None:
                 facts["pr_number"] = pr_number
-            facts = await pr_facts.head_check_facts(self.runner, repo, pr_number, facts,
-                                                    held=conclusion == "action_required")
+            facts = await pr_facts.head_facts(self.runner, repo, pr_number, facts, latest)
             try:
                 result = await self.sink.admit_event(event_type="github.head.checks_completed", facts=facts,
                     origin="connector", producer="github", event_id=_event_id(repo, head_sha, latest))

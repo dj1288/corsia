@@ -30,7 +30,7 @@ from events.identity import (
 from events.connectors.github_artifacts import pr_artifact_in_result
 from events.connectors.github_label_events import IDENTITY, change_event
 from events.connectors.github_ownership import declaration_facts
-from events.connectors.github_pr_facts import FACT_NAMES as _PR_FACTS, HEAD_CHECK_FACT_NAMES as _HEAD_FACTS, pull_facts
+from events.connectors.github_pr_facts import FACT_NAMES as _PR_FACTS, pull_facts
 from events.connectors.github_observe_rules import GITHUB_OBSERVE_RULES
 from events.connectors.github_content_facts import content_facts, content_kind, repository_name
 from events.connectors.github_receiver import GITHUB_RECEIVER
@@ -264,7 +264,7 @@ _PR_LABEL_FILTERABLE = (*_PR_FILTERABLE, "label", "actor", "at")
 _ISSUE_FILTERABLE = ("repo", "issue_number", "label", "labels", "actor", "at",
                      "minutes_since_opened", "state_reason", "author", "author_origin", "item_version")
 _CONTENT_FILTERABLE = ("repo", "author", "author_origin", "item_version")
-_HEAD_CHECKS_FILTERABLE = ("repo", "head_branch", "pr_number", "conclusion", "author_origin", *_HEAD_FACTS)
+_HEAD_CHECKS_FILTERABLE = ("repo", "head_branch", "pr_number", "author_origin", *_PR_FACTS)
 _CHECK_FILTERABLE = ("repo", "branch", "head_sha", "check_suite_id", "conclusion")
 
 MANIFEST = register(ConnectorManifest(

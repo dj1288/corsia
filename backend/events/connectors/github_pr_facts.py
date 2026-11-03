@@ -1,12 +1,16 @@
 """The current pull-request facts a GitHub review event carries.
 
-A webhook's ``pull_request`` object supplies most of them. The current head and
-mergeable state (a payload can be stale or redelivered) are read once, and the
-head's check runs page by page, through the repo-activity poller's budget and
-backoff gate; a spent budget is what bounds the paging. A failed read is never
-an error: the fact reads ``UNKNOWN`` or ``unreadable`` and the event still goes
-out. Check selection, the green conclusions, the mergeable mapping and author
-origin come from their owners.
+A webhook's ``pull_request`` object supplies most of them. On every event kind
+``head_sha`` is the head the event is about (the payload's head, or the head whose
+checks settled) and ``check_state`` describes that head. The pull request is read
+once: it adds ``current_head``, the PR's live head, so a rule finds a stale event
+with ``head_sha != current_head``, and ``base_ref``, ``base_sha``, ``labels``,
+``draft`` and ``mergeable`` from that read describe the PR now. The head's check
+suites are read once and its check runs page by page. Every read passes the
+repo-activity poller's budget and backoff gate; a spent budget is what bounds the
+paging. A failed read is never an error: the fact reads ``UNKNOWN`` or
+``unreadable`` and the event still goes out. Check selection, the green
+conclusions, the mergeable mapping and author origin come from their owners.
 """
 from __future__ import annotations
 
@@ -24,9 +28,10 @@ from reviewer.gh_helpers import GREEN_CONCLUSIONS, mergeable_state, newest_check
 log = logging.getLogger(__name__)
 
 # No head_repo: worker starts read that name as a request for a head tree (automation/worker_inputs.py).
-FACT_NAMES = ("head_sha", "trigger_head", "base_ref", "base_sha", "draft", "mergeable", "labels", "check_state")
-#: A settled head's ``head_sha`` is the head whose checks settled; ``current_head`` is the PR's live head.
-HEAD_CHECK_FACT_NAMES = (*FACT_NAMES, "current_head")
+FACT_NAMES = ("head_sha", "trigger_head", "current_head", "base_ref", "base_sha", "draft", "mergeable", "labels",
+              "check_state")
+#: The facts the PR read refreshes: the pull request's own, not its head's.
+_PR_NOW = ("base_ref", "base_sha", "draft", "mergeable", "labels")
 #: Open-PR event types whose facts are completed by a read; a terminal event keeps what its payload holds.
 READ_TYPES = frozenset({"pr.opened", "pr.synchronize", "pr.ready_for_review", "pr.labeled", "pr.unlabeled"})
 UNREADABLE = "unreadable"
@@ -54,21 +59,30 @@ def pull_facts(pull: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in facts.items() if value is not None}
 
 
-def check_state(runs: list[Any], held: bool = False) -> str:
-    """The head's state from its newest run per check name; ``held`` is a suite waiting for approval.
+def counted_suites(suites: Any) -> list[dict[str, Any]]:
+    """The suites a head waits on: those with runs, and those held for approval (no runs, ``action_required``)."""
+    return [suite for suite in suites if isinstance(suite, dict) and (
+        (suite.get("latest_check_runs_count") or 0) > 0 or suite.get("conclusion") == "action_required")
+    ] if isinstance(suites, list) else []
 
-    Only check runs are read, never commit statuses, so the reviewer's ``qa/llm-reviewer*``
-    statuses never count. A completed run is green only with a conclusion the reviewer
+
+def check_state(suites: list[Any], runs: list[Any]) -> str:
+    """The head's one state from its check suites and its newest run per check name.
+
+    A held suite has no runs, so only the suites show it. Only check suites and runs
+    are read, never commit statuses, so the reviewer's ``qa/llm-reviewer*`` statuses
+    never count. A completed suite or run is green only with a conclusion the reviewer
     gate also counts green; any other, an unknown or missing one included, is failing.
     """
     newest = newest_check_runs([run for run in runs if isinstance(run, dict)])
-    conclusions = {str(run.get("conclusion") or "").upper() for run in newest if run.get("status") == "completed"}
+    items = [*counted_suites(suites), *newest]
+    conclusions = {str(item.get("conclusion") or "").upper() for item in items if item.get("status") == "completed"}
     # A head waiting for a maintainer waits for them first, whatever else failed.
-    if held or "ACTION_REQUIRED" in conclusions:
+    if "ACTION_REQUIRED" in conclusions:
         return "action_required"
     if conclusions - GREEN_CONCLUSIONS:
         return "failing"
-    if any(run.get("status") != "completed" for run in newest) or not newest:
+    if not newest or any(item.get("status") != "completed" for item in items):
         return "pending"
     return "green"
 
@@ -89,14 +103,19 @@ async def _pull(runner: Any, repo: str, number: int) -> Mapping[str, Any] | None
     return body if isinstance(body, Mapping) else None
 
 
-async def _check_state(runner: Any, repo: str, sha: Any, held: bool = False) -> str:
-    """``sha``'s check state from every page of its runs, read until ``total_count``.
+async def _check_state(runner: Any, repo: str, sha: Any, suites: list[Any] | None) -> str:
+    """``sha``'s check state from its suites (read here unless given) and every page of its runs.
 
-    A failed or empty page before then, or no ``total_count``, is ``unreadable``; so is a
-    page the read budget refuses, which is what bounds a head with very many runs.
+    A failed suites read is ``unreadable``. Runs are read until ``total_count``: a failed or
+    empty page before then, or no ``total_count``, is ``unreadable``; so is a page the read
+    budget refuses, which is what bounds a head with very many runs.
     """
     if not isinstance(sha, str) or not sha:
         return UNREADABLE
+    if suites is None:
+        suites = _object(await _read(runner, repo, f"repos/{repo}/commits/{sha}/check-suites")).get("check_suites")
+        if not isinstance(suites, list):
+            return UNREADABLE
     runs: list[Any] = []
     page = 1
     while True:
@@ -106,38 +125,19 @@ async def _check_state(runner: Any, repo: str, sha: Any, held: bool = False) -> 
             return UNREADABLE
         runs += batch
         if len(runs) >= total:
-            return check_state(runs, held)
+            return check_state(suites, runs)
         if not batch:
             return UNREADABLE
         page += 1
 
 
-async def current_facts(runner: Any, repo: str, number: int | None, facts: Mapping[str, Any]) -> dict[str, Any]:
-    """An open-PR event's ``facts`` completed: ``head_sha`` becomes the PR's live head, with its check state.
-
-    Without the PR read the payload's facts stay as they were and ``check_state`` is
-    ``unreadable``: the payload's head may be one the PR has already left.
-    """
-    out = dict(facts)
-    out.setdefault("mergeable", "UNKNOWN")
-    body = await _pull(runner, repo, number) if number is not None else None
-    if body is None:
-        out["check_state"] = UNREADABLE
-        return out
-    out.update({key: value for key, value in pull_facts(body).items() if key != "trigger_head"})
-    out["check_state"] = await _check_state(runner, repo, out.get("head_sha"))
-    return out
-
-
-async def head_check_facts(
-    runner: Any, repo: str, number: int | None, facts: Mapping[str, Any], *, held: bool = False,
+async def head_facts(
+    runner: Any, repo: str, number: int | None, facts: Mapping[str, Any], suites: list[Any] | None = None,
 ) -> dict[str, Any]:
-    """A settled head's ``facts`` completed; ``head_sha`` stays the head whose checks settled.
+    """An event's ``facts`` completed for its ``head_sha``, which no read changes.
 
-    The PR read adds ``current_head``, the PR's live head, which may already have
-    moved on. ``base_ref``, ``base_sha``, ``labels``, ``draft`` and ``mergeable`` come from that
-    same read, so they describe the live head (``current_head``), not the settled
-    one. When the read fails, ``check_state`` is ``unreadable``.
+    ``suites`` are the head's check suites when the caller has already read them. When
+    the PR read fails, ``current_head`` is absent and ``check_state`` is ``unreadable``.
     """
     out = dict(facts)
     out.setdefault("mergeable", "UNKNOWN")
@@ -147,15 +147,13 @@ async def head_check_facts(
             out["check_state"] = UNREADABLE
             return out
         live = pull_facts(body)
-        live.pop("trigger_head", None)
-        current = live.pop("head_sha", None)
-        if current is not None:
-            out["current_head"] = current
-        out.update(live)
+        out.update({name: live[name] for name in _PR_NOW if name in live})
+        if "head_sha" in live:
+            out["current_head"] = live["head_sha"]
         login = _text(_object(body.get("user")).get("login"))
         if login:
             out["author_origin"] = author_origin(login)
-    out["check_state"] = await _check_state(runner, repo, out.get("head_sha"), held)
+    out["check_state"] = await _check_state(runner, repo, out.get("head_sha"), suites)
     return out
 
 
@@ -171,5 +169,5 @@ async def enriched(envelope: Any, runner: Any = None) -> Any:
     repo, number = envelope.facts.get("repo"), envelope.facts.get("pr_number")
     if not isinstance(repo, str):
         return envelope
-    facts = await current_facts(runner, repo, number if isinstance(number, int) else None, envelope.facts)
+    facts = await head_facts(runner, repo, number if isinstance(number, int) else None, envelope.facts)
     return dataclasses.replace(envelope, facts=facts)
