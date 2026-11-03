@@ -19,8 +19,8 @@ from events.connectors.github_label_events import label_names
 
 log = logging.getLogger(__name__)
 
-FACT_NAMES = ("head_sha", "trigger_head", "head_repo", "base_repo", "base_ref", "base_sha",
-              "draft", "mergeable", "labels", "check_state")
+# No head_repo: worker starts read that name as a request for a head tree (automation/worker_inputs.py).
+FACT_NAMES = ("head_sha", "trigger_head", "base_ref", "base_sha", "draft", "mergeable", "labels", "check_state")
 #: Open-PR event types whose facts are completed by a read; a terminal event keeps what its payload holds.
 READ_TYPES = frozenset({"pr.opened", "pr.synchronize", "pr.ready_for_review", "pr.labeled", "pr.unlabeled"})
 UNREADABLE = "unreadable"
@@ -49,8 +49,6 @@ def pull_facts(pull: Mapping[str, Any]) -> dict[str, Any]:
     sha = _text(head.get("sha"))
     facts = {
         "head_sha": sha, "trigger_head": sha,
-        "head_repo": _text(_object(head.get("repo")).get("full_name")),
-        "base_repo": _text(_object(base.get("repo")).get("full_name")),
         "base_ref": _text(base.get("ref")), "base_sha": _text(base.get("sha")),
         "draft": pull.get("draft") if isinstance(pull.get("draft"), bool) else None,
         "mergeable": mergeable_state(pull.get("mergeable")),

@@ -34,13 +34,13 @@ def test_mergeable_is_a_string_enum_never_a_boolean(value, state):
 
 def test_pull_facts_come_from_the_pull_request_object():
     got = facts.pull_facts(pull())
-    assert got == {"head_sha": "h1", "trigger_head": "h1", "head_repo": "fork/r", "base_repo": "o/r",
-                   "base_ref": "dev", "base_sha": "b1", "draft": False, "mergeable": "UNKNOWN",
+    assert got == {"head_sha": "h1", "trigger_head": "h1", "base_ref": "dev", "base_sha": "b1", "draft": False, "mergeable": "UNKNOWN",
                    "labels": ["a", "b"]}
 
 
-def test_a_deleted_fork_leaves_head_repo_out():
-    assert "head_repo" not in facts.pull_facts(pull(head={"sha": "h1", "repo": None}))
+def test_no_fact_asks_a_started_worker_for_a_head_tree():
+    from automation.worker_inputs import HEAD_REPO_FACT
+    assert HEAD_REPO_FACT not in facts.pull_facts(pull()) and HEAD_REPO_FACT not in facts.FACT_NAMES
 
 
 @pytest.mark.parametrize("runs, held, state", [
@@ -62,8 +62,7 @@ def test_check_state_uses_the_newest_run_per_name_without_the_reviewer(runs, hel
 
 def test_a_webhook_event_carries_the_pull_request_facts():
     envelope = normalize("github", webhook(), "pr.synchronize")
-    for name in ("head_sha", "trigger_head", "head_repo", "base_repo", "base_ref", "base_sha", "draft",
-                 "mergeable", "labels"):
+    for name in ("head_sha", "trigger_head", "base_ref", "base_sha", "draft", "mergeable", "labels"):
         assert name in envelope.facts
     assert envelope.facts["labels"] == ["a", "b"] and envelope.facts["sha"] == "h1"
 
