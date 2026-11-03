@@ -353,8 +353,8 @@ async def _result_on_a_prs_artifact(world, monkeypatch, took: bool):
     if took:
         await _script_rule(owner_script(world, monkeypatch, "took.sh"), "result")
     created = await atool(OWNER, operation="create", connector="github", event_type="pr.synchronize",
-                          action="start_worker", workflow_id="worker-flow", request_identity_fact="sha",
-                          match=[{"field": "sha", "op": "present"}])
+                          action="start_worker", workflow_id="worker-flow", request_identity_fact="head_sha",
+                          match=[{"field": "head_sha", "op": "present"}])
     assert isinstance(created, dict), created
     from infra.database import get_db
 

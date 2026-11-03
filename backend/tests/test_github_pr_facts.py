@@ -51,8 +51,7 @@ def test_mergeable_is_a_string_enum_never_a_boolean(value, state):
 
 def test_pull_facts_come_from_the_pull_request_object():
     got = facts.pull_facts(pull())
-    assert got == {"head_sha": "h1", "trigger_head": "h1", "base_ref": "dev", "base_sha": "b1", "draft": False,
-                   "mergeable": "UNKNOWN", "labels": ["a", "b"]}
+    assert got == {"head_sha": "h1", "base_sha": "b1", "draft": False, "mergeable": "UNKNOWN", "labels": ["a", "b"]}
 
 
 def test_no_fact_asks_a_started_worker_for_a_head_tree():
@@ -102,9 +101,12 @@ def test_check_state_selects_the_run_the_reviewer_gate_selects():
 
 def test_a_webhook_event_carries_the_pull_request_facts():
     envelope = normalize("github", webhook(), "pr.synchronize")
-    for name in ("head_sha", "trigger_head", "base_ref", "base_sha", "draft", "mergeable", "labels"):
+    for name in ("head_sha", "base_sha", "draft", "mergeable", "labels"):
         assert name in envelope.facts
-    assert envelope.facts["labels"] == ["a", "b"] and envelope.facts["sha"] == "h1"
+    assert envelope.facts["labels"] == ["a", "b"] and envelope.facts["head_sha"] == "h1"
+    # One name per value: the head is head_sha, the base is branch.
+    assert envelope.facts["branch"] == "dev"
+    assert not {"sha", "trigger_head", "base_ref"} & set(envelope.facts)
 
 
 def test_every_new_fact_is_declared_for_rules():
@@ -112,7 +114,9 @@ def test_every_new_fact_is_declared_for_rules():
                   "pr.merged", "pr.closed"):
         assert set(facts.FACT_NAMES) <= set(MANIFEST.decl(event).filterable_fields), event
     head = MANIFEST.decl("head.checks_completed").filterable_fields
-    assert set(facts.FACT_NAMES) <= set(head) and "conclusion" not in head  # one outcome fact: check_state
+    assert set(facts.HEAD_FACT_NAMES) <= set(head) and "conclusion" not in head  # one outcome: check_state
+    for event in MANIFEST.event_types:
+        assert not {"sha", "trigger_head", "base_ref"} & set(MANIFEST.decl(event).filterable_fields), event
 
 
 class Reads:
@@ -211,11 +215,12 @@ async def test_a_head_checks_event_keeps_its_settled_head_when_the_pull_request_
     reader = reads({"/pulls/7": pull(mergeable=True, head={"sha": "Y"}),
                     "/commits/X/check-runs": page(run("ci", conclusion="failure")),
                     "/commits/Y/check-runs": page(run("ci"))})
-    settled = {"repo": "o/r", "head_sha": "X", "trigger_head": "X"}
+    settled = {"repo": "o/r", "head_sha": "X"}
     got = await facts.head_facts(None, "o/r", 7, settled, [suite("failure")])
-    assert got["head_sha"] == "X" and got["trigger_head"] == "X" and got["current_head"] == "Y"
+    assert got["head_sha"] == "X" and got["current_head"] == "Y"
     assert got["check_state"] == "failing"  # about X
-    assert got["mergeable"] == "MERGEABLE" and got["base_ref"] == "dev"
+    # The read refreshes only draft, mergeable and labels; the base stays the payload's.
+    assert got["mergeable"] == "MERGEABLE" and got["labels"] == ["a", "b"] and "base_sha" not in got
     # The aggregator passes the suites it read, so only the PR and X's runs are read here.
     assert reader.paths == ["repos/o/r/pulls/7", f"repos/o/r/commits/X/{CHECKS}1"]
 
@@ -234,8 +239,8 @@ async def test_a_held_head_reads_action_required_on_every_event_kind(reads, foun
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("given", [{"repo": "o/r", "head_sha": "X", "trigger_head": "X"},
-                                   {"head_sha": "X", "sha": "X", "mergeable": "MERGEABLE"}])
+@pytest.mark.parametrize("given", [{"repo": "o/r", "head_sha": "X"},
+                                   {"head_sha": "X", "mergeable": "MERGEABLE"}])
 async def test_a_failed_pull_request_read_keeps_head_sha_and_has_no_current_head(reads, given):
     reader = reads({"/check-suites": suites(suite()), "/check-runs": page(run("ci"))})  # would answer green
     got = await facts.head_facts(None, "o/r", 7, given)

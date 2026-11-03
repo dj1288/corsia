@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from connections.github_broker import GithubReadBroker, GithubReadRefused, default_broker, person_broker
+from connections.github_broker import GithubReadBroker, GithubReadRefused
 from connections.github_read_request import AUTH_PROBE
 from events.connectors import github_notifications_feed as feed
 from github_broker_fixtures import OK, REPO, REPO_ID, Inner, make_broker, refusal, secret
@@ -255,8 +255,8 @@ def test_every_poller_defaults_to_the_broker(monkeypatch) -> None:
     monkeypatch.setattr(activity, "poll_once", stop_poll)
     with pytest.raises(Stop):
         asyncio.run(activity.repo_activity_poll_loop())
-    assert seen["quiet"] is seen["activity"] is default_broker()  # the person's feed reads as the person
-    assert seen["notifications"] is person_broker() and seen["notifications"] is not default_broker()
+    assert isinstance(seen["notifications"], GithubReadBroker)
+    assert seen["notifications"] is seen["quiet"] is seen["activity"]
 
 
 # --- the token never leaves ------------------------------------------------

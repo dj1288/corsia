@@ -81,7 +81,6 @@ async def test_a_webhook_repository_emits_through_the_broker(monkeypatch):
     await finish(agg)
     assert calls == ["repos/o/r/commits/abc/check-suites", "repos/o/r/commits/abc/check-runs?per_page=100&page=1"]
     assert sink.events[0]["event_type"] == "github.head.checks_completed"
-    assert sink.events[0]["facts"]["trigger_head"] == "abc"
     assert sink.events[0]["facts"]["check_state"] == "unreadable"
     budget.clear()
 
@@ -147,7 +146,7 @@ async def test_many_settled_and_failed_heads_leave_no_state(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sink_failure_is_logged_and_clears_both_maps(monkeypatch):
+async def test_sink_failure_clears_both_maps(monkeypatch):
     async def read(*_args):
         return response(), None
 
@@ -158,7 +157,8 @@ async def test_sink_failure_is_logged_and_clears_both_maps(monkeypatch):
     monkeypatch.setattr(poller, "gated_read", read)
     agg = aggregator(FailingSink())
     agg.observe(payload())
-    await finish(agg)
+    with pytest.raises(RuntimeError, match="intake unavailable"):
+        await finish(agg)
     assert not agg._tasks and not agg._facts
 
 
@@ -174,7 +174,7 @@ async def test_refusal_logged_without_optional_none_facts(monkeypatch, caplog):
         agg.observe(payload())
         await finish(agg)
     assert sink.events[0]["facts"] == {
-        "repo": "o/r", "head_sha": "abc", "trigger_head": "abc",
+        "repo": "o/r", "head_sha": "abc",
         "mergeable": "UNKNOWN", "check_state": "unreadable"}
     assert "code=unknown_type" in caplog.text and "private details" not in caplog.text
     assert sink.events[0]["origin"] == "connector"
@@ -281,12 +281,15 @@ def test_event_identity_depends_on_suites_not_delivery():
     assert checks._event_id("o/r", "abc", suites) != checks._event_id("o/r", "abc", [{**suites[0], "updated_at": "later"}])
 
 
-def test_hook_is_on_by_default_and_off_in_test_mode(monkeypatch):
+def test_hook_requires_both_switches(monkeypatch):
+    monkeypatch.setenv(checks.ENABLE_ENV, "1")
     monkeypatch.setenv("CORSIA_TEST_MODE", "1")
     assert checks.hook_disabled_reason() == "test_mode"
     monkeypatch.setenv("CORSIA_TEST_MODE", "0")
     monkeypatch.setenv(poller.DISABLE_ENV, "1")
     assert checks.hook_disabled_reason() is None
+    monkeypatch.delenv(checks.ENABLE_ENV)
+    assert checks.hook_disabled_reason() == "not_enabled"
 
 
 @pytest.mark.asyncio
@@ -341,7 +344,7 @@ async def test_a_head_whose_pull_request_moved_on_is_still_named_by_its_settled_
     agg.observe(payload("abc"), {"number": 7})
     await finish(agg)
     event = sink.events[0]
-    assert event["facts"]["head_sha"] == "abc" and event["facts"]["trigger_head"] == "abc"
+    assert event["facts"]["head_sha"] == "abc"
     assert event["facts"]["current_head"] == "new"
     assert event["facts"]["check_state"] == "failing"
     assert paths[-1] == "repos/o/r/commits/abc/check-runs?per_page=100&page=1"

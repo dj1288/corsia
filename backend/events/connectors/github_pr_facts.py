@@ -2,10 +2,11 @@
 
 A webhook's ``pull_request`` object supplies most of them. On every event kind
 ``head_sha`` is the head the event is about (the payload's head, or the head whose
-checks settled) and ``check_state`` describes that head. The pull request is read
-once: it adds ``current_head``, the PR's live head, so a rule finds a stale event
-with ``head_sha != current_head``, and ``base_ref``, ``base_sha``, ``labels``,
-``draft`` and ``mergeable`` from that read describe the PR now. The head's check
+checks settled), no read changes it, and ``check_state`` describes that head.
+``base_sha`` comes from the payload only. The pull request is read once: it adds
+``current_head``, the PR's live head, so a rule finds a stale event with
+``head_sha != current_head``, and its ``labels``, ``draft`` and ``mergeable``
+describe the PR now. The head's check
 suites are read once and its check runs page by page. Every read passes the
 repo-activity poller's budget and backoff gate; a spent budget is what bounds the
 paging. A failed read is never an error: the fact reads ``UNKNOWN`` or
@@ -28,10 +29,11 @@ from reviewer.gh_helpers import GREEN_CONCLUSIONS, mergeable_state, newest_check
 log = logging.getLogger(__name__)
 
 # No head_repo: worker starts read that name as a request for a head tree (automation/worker_inputs.py).
-FACT_NAMES = ("head_sha", "trigger_head", "current_head", "base_ref", "base_sha", "draft", "mergeable", "labels",
-              "check_state")
-#: The facts the PR read refreshes: the pull request's own, not its head's.
-_PR_NOW = ("base_ref", "base_sha", "draft", "mergeable", "labels")
+FACT_NAMES = ("head_sha", "current_head", "base_sha", "draft", "mergeable", "labels", "check_state")
+#: A settled head's facts: no base, since ``base_sha`` comes from a PR event's payload only.
+HEAD_FACT_NAMES = tuple(name for name in FACT_NAMES if name != "base_sha")
+#: The facts the PR read refreshes: the pull request's own, not its head's or its base's.
+_PR_NOW = ("draft", "mergeable", "labels")
 #: Open-PR event types whose facts are completed by a read; a terminal event keeps what its payload holds.
 READ_TYPES = frozenset({"pr.opened", "pr.synchronize", "pr.ready_for_review", "pr.labeled", "pr.unlabeled"})
 UNREADABLE = "unreadable"
@@ -48,10 +50,8 @@ def _text(value: Any) -> str | None:
 def pull_facts(pull: Mapping[str, Any]) -> dict[str, Any]:
     """Facts from a pull request object, a webhook's or a REST read's."""
     head, base = _object(pull.get("head")), _object(pull.get("base"))
-    sha = _text(head.get("sha"))
     facts = {
-        "head_sha": sha, "trigger_head": sha,
-        "base_ref": _text(base.get("ref")), "base_sha": _text(base.get("sha")),
+        "head_sha": _text(head.get("sha")), "base_sha": _text(base.get("sha")),
         "draft": pull.get("draft") if isinstance(pull.get("draft"), bool) else None,
         "mergeable": mergeable_state(pull.get("mergeable")),
         "labels": label_names(pull["labels"]) if isinstance(pull.get("labels"), list) else None,

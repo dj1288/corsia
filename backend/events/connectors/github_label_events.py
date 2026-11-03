@@ -103,7 +103,7 @@ def _pr_change(payload: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     if facts is None:
         return None
     if sha := _text(_object(pr.get("head")).get("sha")):
-        facts["sha"] = sha
+        facts["head_sha"] = sha
     return f"pr.{action}", facts
 
 

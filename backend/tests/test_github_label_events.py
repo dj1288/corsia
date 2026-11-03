@@ -66,7 +66,7 @@ def test_pr_labeled_poller_copy_carries_what_the_row_proves_and_no_label_set():
     assert webhook.type == "pr.labeled" and key == "labeled:cebertowicz/corsia:34114590651"
     assert webhook.facts == {
         "repo": REPO, "pr_number": 1421, "label": "connectors", "labels": ["connectors"],
-        "actor": "cebertowicz", "at": "2026-10-24T06:25:11Z", "sha": "9f2d6c1",
+        "actor": "cebertowicz", "at": "2026-10-24T06:25:11Z", "head_sha": "9f2d6c1",
     }
 
 
@@ -81,7 +81,7 @@ def test_issue_labeled_poller_copy_carries_minutes_not_sha_or_labels():
     event, payload, _ = poller_copy(row)
     poller = events.change_event(event, payload)
     assert event == "issues" and webhook and poller and (poller.type, poller.facts) == (webhook.type, row_facts(webhook))
-    assert webhook.type == "issue.labeled" and "sha" not in webhook.facts and "labels" not in poller.facts
+    assert webhook.type == "issue.labeled" and "head_sha" not in webhook.facts and "labels" not in poller.facts
     assert webhook.facts["minutes_since_opened"] >= 0 and webhook.facts["issue_number"] == issue["number"]
     assert set(webhook.facts) == {"repo", "issue_number", "label", "labels", "actor", "at", "minutes_since_opened"}
 
@@ -152,8 +152,8 @@ def test_manifest_declares_label_as_a_filterable_field_and_the_per_change_identi
         decl = MANIFEST.decl(suffix)
         assert "label" in decl.filterable_fields and "actor" in decl.filterable_fields
         assert "label" in decl.identity_facts and "at" in decl.identity_facts
-    assert "sha" in MANIFEST.decl("pr.labeled").filterable_fields
-    assert "sha" not in MANIFEST.decl("issue.labeled").filterable_fields
+    assert "head_sha" in MANIFEST.decl("pr.labeled").filterable_fields
+    assert "head_sha" not in MANIFEST.decl("issue.labeled").filterable_fields
     assert MANIFEST.decl("pr.labeled").routed_event == "webhook.github.pr_labeled"
     assert MANIFEST.classify(pr_webhook("unlabeled")) == "pr.unlabeled"
     assert MANIFEST.classify(pr_webhook()) == "pr.labeled"

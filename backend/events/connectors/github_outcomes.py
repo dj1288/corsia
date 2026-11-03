@@ -320,8 +320,8 @@ def label_drafts(event_type: str, payload: dict[str, Any], repo: str) -> list[Ou
         attrs: dict[str, Any] = {"repo": repo, "pr": str(facts["pr_number"])}
         if "labels" in facts:
             attrs["label_count"] = len(facts["labels"])
-        if "sha" in facts:
-            attrs["head_sha"] = facts["sha"]
+        if "head_sha" in facts:
+            attrs["head_sha"] = facts["head_sha"]
     else:
         subject = f"github:issue:{repo}#{facts['issue_number']}"
         attrs = {"repo": repo, "issue": str(facts["issue_number"])}
