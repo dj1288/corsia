@@ -50,6 +50,7 @@ def test_a_deleted_fork_leaves_head_repo_out():
     ([run("a", conclusion="failure"), run("b", status="queued", conclusion=None)], False, "failing"),
     ([run("a", conclusion="action_required")], False, "action_required"),
     ([run("a")], True, "action_required"),
+    ([run("a", conclusion="failure")], True, "action_required"),
     ([run("a", conclusion="failure", started="2026-01-01T00:00:00Z", id=1),
       run("a", conclusion="success", started="2026-01-02T00:00:00Z", id=2)], False, "green"),
     ([run("qa/llm-reviewer", status="queued", conclusion=None), run("qa/llm-reviewer-present", conclusion="failure"),
@@ -103,10 +104,12 @@ async def test_current_facts_reads_the_pull_request_once_and_the_checks_once(rea
 
 
 @pytest.mark.asyncio
-async def test_a_known_mergeable_state_skips_the_pull_request_read(reads):
-    reader = reads({"/check-runs": {"check_runs": [run("ci", conclusion="failure")]}})
-    got = await facts.current_facts(None, "o/r", 7, facts.pull_facts(pull(mergeable=False)))
-    assert reader.paths == ["repos/o/r/commits/h1/check-runs?per_page=100"]
+async def test_a_known_mergeable_state_still_reads_the_current_head(reads):
+    reader = reads({"/pulls/7": pull(mergeable=False, head={"sha": "h2"}),
+                    "/check-runs": {"check_runs": [run("ci", conclusion="failure")]}})
+    got = await facts.current_facts(None, "o/r", 7, facts.pull_facts(pull(mergeable=True)))
+    assert reader.paths == ["repos/o/r/pulls/7", "repos/o/r/commits/h2/check-runs?per_page=100"]
+    assert got["head_sha"] == "h2" and got["trigger_head"] == "h1"
     assert got["mergeable"] == "CONFLICTING" and got["check_state"] == "failing"
 
 
@@ -135,7 +138,7 @@ async def test_enrichment_only_completes_open_pr_events(reads):
         normalize("github", webhook("closed", merged=True), "pr.merged"), object())
     assert "check_state" not in closed.facts
     assert await facts.enriched(None) is None
-    assert len(reader.paths) == 1
+    assert len(reader.paths) == 2  # the opened event's PR and checks reads; the merged one reads nothing
 
 
 def test_the_broker_runs_gh_as_the_agents_account(monkeypatch):

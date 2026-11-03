@@ -1,8 +1,8 @@
 """The current pull-request facts a GitHub review event carries.
 
-A webhook's ``pull_request`` object supplies most of them. What it cannot (a
-mergeable state GitHub has not computed yet, and the head's check state) is read
-once each through the repo-activity poller's budget and backoff gate. A failed
+A webhook's ``pull_request`` object supplies most of them. The current head and
+mergeable state (a payload can be stale or redelivered), and the head's check
+state, are read once each through the repo-activity poller's budget and backoff gate. A failed
 read is never an error: the fact reads ``UNKNOWN`` or ``unreadable`` and the
 event still goes out.
 """
@@ -71,10 +71,11 @@ def check_state(runs: list[Any], held: bool = False) -> str:
         if old is None or order > (str(old.get("started_at") or ""), int(old.get("id") or 0)):
             newest[name] = run
     conclusions = {str(run.get("conclusion") or "") for run in newest.values() if run.get("status") == "completed"}
-    if conclusions & _FAILING:
-        return "failing"
+    # A head waiting for a maintainer waits for them first, whatever else failed.
     if held or "action_required" in conclusions:
         return "action_required"
+    if conclusions & _FAILING:
+        return "failing"
     if any(run.get("status") != "completed" for run in newest.values()) or not newest:
         return "pending"
     return "green"
@@ -94,10 +95,10 @@ async def _read(runner: Any, repo: str, path: str) -> Any:
 async def current_facts(
     runner: Any, repo: str, number: int | None, facts: Mapping[str, Any], *, held: bool = False,
 ) -> dict[str, Any]:
-    """``facts`` completed: one PR read while mergeable is unknown, one checks read for the head."""
+    """``facts`` completed: one PR read for the current head and mergeable state, one checks read for that head."""
     out = dict(facts)
     out.setdefault("mergeable", "UNKNOWN")
-    if out["mergeable"] == "UNKNOWN" and number is not None:
+    if number is not None:
         body = await _read(runner, repo, f"repos/{repo}/pulls/{number}")
         if isinstance(body, Mapping):
             out.update({key: value for key, value in pull_facts(body).items() if key != "trigger_head"})
