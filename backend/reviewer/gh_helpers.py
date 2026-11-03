@@ -13,6 +13,8 @@ from reviewer.gh_api import run_gh
 log = logging.getLogger(__name__)
 
 _GH_TIMEOUT_S = 30.0
+#: The only conclusions that count as green; anything else a completed check ends with is not.
+GREEN_CONCLUSIONS = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
 STATUS_STAMP_INSTANCE_CHARS = 12
 STATUS_WRITE_ID_CHARS = 12
 STATUS_WRITE_STAMP = re.compile(

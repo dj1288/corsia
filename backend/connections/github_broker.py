@@ -21,7 +21,7 @@ from connections.github_read_request import (
 )
 from host_access.credential_sanitizer import REDACTION_MARKER, sanitize_credential_text
 
-__all__ = ["GithubReadBroker", "GithubReadRefused", "default_broker"]
+__all__ = ["GithubReadBroker", "GithubReadRefused", "default_broker", "person_broker"]
 log = logging.getLogger(__name__)
 
 
@@ -32,6 +32,14 @@ def _scrub(text: str) -> str:
         if len(secret) >= 8:
             text = text.replace(secret, REDACTION_MARKER)
     return sanitize_credential_text(text)
+
+
+def _run_host_gh(args: list[str], *, timeout: float) -> subprocess.CompletedProcess:
+    """Run the vetted read as the instance's own ``gh`` login."""
+    return subprocess.run(
+        ["gh", *args], capture_output=True, text=True, timeout=timeout, check=False,
+        env={**os.environ, "GH_HOST": GH_HOST},
+    )
 
 
 def _run_gh(args: list[str], *, timeout: float) -> subprocess.CompletedProcess:
@@ -87,6 +95,7 @@ class GithubReadBroker:
 
 
 _default: GithubReadBroker | None = None
+_person: GithubReadBroker | None = None
 
 
 def default_broker() -> GithubReadBroker:
@@ -95,3 +104,11 @@ def default_broker() -> GithubReadBroker:
     if _default is None:
         _default = GithubReadBroker()
     return _default
+
+
+def person_broker() -> GithubReadBroker:
+    """The broker for a read of the person's own account, such as their notifications feed."""
+    global _person
+    if _person is None:
+        _person = GithubReadBroker(_run_host_gh)
+    return _person

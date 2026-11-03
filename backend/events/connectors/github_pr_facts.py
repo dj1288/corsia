@@ -3,9 +3,10 @@
 A webhook's ``pull_request`` object supplies most of them. The current head and
 mergeable state (a payload can be stale or redelivered) are read once, and the
 head's check runs page by page, through the repo-activity poller's budget and
-backoff gate. A failed read is never an error: the fact reads ``UNKNOWN`` or
-``unreadable`` and the event still goes out. Check selection, the mergeable
-mapping, the reviewer's context and author origin come from their owners.
+backoff gate; a spent budget is what bounds the paging. A failed read is never
+an error: the fact reads ``UNKNOWN`` or ``unreadable`` and the event still goes
+out. Check selection, the green conclusions, the mergeable mapping and author
+origin come from their owners.
 """
 from __future__ import annotations
 
@@ -18,8 +19,7 @@ from typing import Any
 
 from events.connectors.github_content_facts import author_origin
 from events.connectors.github_label_events import label_names
-from reviewer.gh_helpers import mergeable_state, newest_check_runs
-from reviewer.reviewer_categories import STATUS_CHECK_CONTEXT
+from reviewer.gh_helpers import GREEN_CONCLUSIONS, mergeable_state, newest_check_runs
 
 log = logging.getLogger(__name__)
 
@@ -30,9 +30,6 @@ HEAD_CHECK_FACT_NAMES = (*FACT_NAMES, "current_head")
 #: Open-PR event types whose facts are completed by a read; a terminal event keeps what its payload holds.
 READ_TYPES = frozenset({"pr.opened", "pr.synchronize", "pr.ready_for_review", "pr.labeled", "pr.unlabeled"})
 UNREADABLE = "unreadable"
-#: A head with more check runs than this many pages of 100 reads ``unreadable``.
-MAX_CHECK_PAGES = 5
-_FAILING = frozenset({"failure", "timed_out", "cancelled", "startup_failure", "stale"})
 
 
 def _object(value: Any) -> Mapping[str, Any]:
@@ -60,15 +57,16 @@ def pull_facts(pull: Mapping[str, Any]) -> dict[str, Any]:
 def check_state(runs: list[Any], held: bool = False) -> str:
     """The head's state from its newest run per check name; ``held`` is a suite waiting for approval.
 
-    The reviewer's own checks (every context it posts starts with its name) never count.
+    Only check runs are read, never commit statuses, so the reviewer's ``qa/llm-reviewer*``
+    statuses never count. A completed run is green only with a conclusion the reviewer
+    gate also counts green; any other, an unknown or missing one included, is failing.
     """
-    newest = [run for run in newest_check_runs([run for run in runs if isinstance(run, dict)])
-              if not str(run.get("name") or "").startswith(STATUS_CHECK_CONTEXT)]
-    conclusions = {str(run.get("conclusion") or "") for run in newest if run.get("status") == "completed"}
+    newest = newest_check_runs([run for run in runs if isinstance(run, dict)])
+    conclusions = {str(run.get("conclusion") or "").upper() for run in newest if run.get("status") == "completed"}
     # A head waiting for a maintainer waits for them first, whatever else failed.
-    if held or "action_required" in conclusions:
+    if held or "ACTION_REQUIRED" in conclusions:
         return "action_required"
-    if conclusions & _FAILING:
+    if conclusions - GREEN_CONCLUSIONS:
         return "failing"
     if any(run.get("status") != "completed" for run in newest) or not newest:
         return "pending"
@@ -92,11 +90,16 @@ async def _pull(runner: Any, repo: str, number: int) -> Mapping[str, Any] | None
 
 
 async def _check_state(runner: Any, repo: str, sha: Any, held: bool = False) -> str:
-    """``sha``'s check state from every page of its runs; a failed page, or too many, is ``unreadable``."""
+    """``sha``'s check state from every page of its runs, read until ``total_count``.
+
+    A failed or empty page before then, or no ``total_count``, is ``unreadable``; so is a
+    page the read budget refuses, which is what bounds a head with very many runs.
+    """
     if not isinstance(sha, str) or not sha:
         return UNREADABLE
     runs: list[Any] = []
-    for page in range(1, MAX_CHECK_PAGES + 1):
+    page = 1
+    while True:
         body = _object(await _read(runner, repo, f"repos/{repo}/commits/{sha}/check-runs?per_page=100&page={page}"))
         batch, total = body.get("check_runs"), body.get("total_count")
         if not isinstance(batch, list) or not isinstance(total, int):
@@ -104,16 +107,24 @@ async def _check_state(runner: Any, repo: str, sha: Any, held: bool = False) -> 
         runs += batch
         if len(runs) >= total:
             return check_state(runs, held)
-    return UNREADABLE
+        if not batch:
+            return UNREADABLE
+        page += 1
 
 
 async def current_facts(runner: Any, repo: str, number: int | None, facts: Mapping[str, Any]) -> dict[str, Any]:
-    """An open-PR event's ``facts`` completed: ``head_sha`` becomes the PR's live head, with its check state."""
+    """An open-PR event's ``facts`` completed: ``head_sha`` becomes the PR's live head, with its check state.
+
+    Without the PR read the payload's facts stay as they were and ``check_state`` is
+    ``unreadable``: the payload's head may be one the PR has already left.
+    """
     out = dict(facts)
     out.setdefault("mergeable", "UNKNOWN")
     body = await _pull(runner, repo, number) if number is not None else None
-    if body is not None:
-        out.update({key: value for key, value in pull_facts(body).items() if key != "trigger_head"})
+    if body is None:
+        out["check_state"] = UNREADABLE
+        return out
+    out.update({key: value for key, value in pull_facts(body).items() if key != "trigger_head"})
     out["check_state"] = await _check_state(runner, repo, out.get("head_sha"))
     return out
 
@@ -124,7 +135,9 @@ async def head_check_facts(
     """A settled head's ``facts`` completed; ``head_sha`` stays the head whose checks settled.
 
     The PR read adds ``current_head``, the PR's live head, which may already have
-    moved on. When that read fails, ``check_state`` is ``unreadable``.
+    moved on. ``base_ref``, ``base_sha``, ``labels``, ``draft`` and ``mergeable`` come from that
+    same read, so they describe the live head (``current_head``), not the settled
+    one. When the read fails, ``check_state`` is ``unreadable``.
     """
     out = dict(facts)
     out.setdefault("mergeable", "UNKNOWN")

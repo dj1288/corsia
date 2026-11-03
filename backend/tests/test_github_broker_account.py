@@ -1,6 +1,7 @@
-"""Which GitHub account the pollers' read broker runs ``gh`` as."""
+"""Which GitHub account the pollers' read brokers run ``gh`` as."""
 from __future__ import annotations
 
+import asyncio
 import subprocess
 
 import pytest
@@ -45,6 +46,25 @@ def test_an_agents_account_that_is_not_ready_reads_locked_never_as_the_person(mo
     _run_gh(["api", "user"], timeout=5)
     assert ran["argv"][0] == "/agent/gh"
     assert ran["env"]["GH_CONFIG_DIR"] == LOCKED_HOME and "GH_TOKEN" not in ran["env"]
+
+
+def test_the_notifications_feed_is_read_as_the_person_never_the_agents_account(monkeypatch, ran):
+    from events.connectors import github_notifications as notifications
+
+    def never(*_args):
+        raise AssertionError("the person's feed never runs as the agents' account")
+
+    async def one_cycle(runner, failures=0):
+        runner(["api", "--method", "GET", "-i", "notifications"], timeout=5)
+        return None, 0
+
+    monkeypatch.setattr(github_agent, "view", never)
+    monkeypatch.setattr(github_agent, "backend_gh", never)
+    monkeypatch.setattr(notifications, "run_cycle", one_cycle)
+    monkeypatch.delenv("GH_CONFIG_DIR", raising=False)
+    asyncio.run(notifications.notifications_poll_loop())
+    assert ran["argv"] == ["gh", "api", "--method", "GET", "-i", "notifications"]
+    assert ran["env"]["GH_HOST"] == "github.com" and "GH_CONFIG_DIR" not in ran["env"]
 
 
 @pytest.mark.parametrize("verified, home", [

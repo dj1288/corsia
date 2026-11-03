@@ -5,6 +5,11 @@ router dependency: the injected sink is the generic event intake (``admit_event`
 origin ``connector``), and ``event_id`` comes from the head's check suites, never
 from a delivery.  Its reads pass the repo-activity poller's budget and backoff
 gate. A suite held for approval (no runs, ``action_required``) is a settled head too.
+
+The event carries two outcome facts for its head. ``conclusion`` is the suites'
+combined conclusion for the settled head, as it was before ``check_state``.
+``check_state`` is the per-run state of event-rules design §7.1, which Quality
+Gate's ``evaluate`` decides on.
 """
 from __future__ import annotations
 

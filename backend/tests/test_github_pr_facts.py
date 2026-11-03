@@ -62,11 +62,18 @@ def test_no_fact_asks_a_started_worker_for_a_head_tree():
     # A re-run that started after the old run completed is the newest, even before it completes.
     ([run("a", conclusion="failure", completed="2026-01-01T00:05:00Z", id=1),
       run("a", status="in_progress", conclusion=None, started="2026-01-01T00:06:00Z", id=2)], False, "pending"),
-    ([run("qa/llm-reviewer", status="queued", conclusion=None), run("qa/llm-reviewer-present", conclusion="failure"),
-      run("ci")], False, "green"),
+    # Only the conclusions the reviewer gate counts green are green; a missing or unknown one fails.
+    ([run("a"), run("b", conclusion=None)], False, "failing"),
+    ([run("a"), run("b", conclusion="something_new")], False, "failing"),
 ])
 def test_check_state_uses_the_newest_run_per_name_without_the_reviewer(runs, held, state):
     assert facts.check_state(runs, held) == state
+
+
+def test_check_state_and_the_reviewer_gate_share_one_green_list():
+    from events.connectors import github_reviewer_gate as gate
+    assert gate.GREEN_CONCLUSIONS is gh_helpers.GREEN_CONCLUSIONS
+    assert not hasattr(facts, "_FAILING") and not hasattr(gate, "_TERMINAL_GREEN_STATES")
 
 
 def test_check_state_selects_the_run_the_reviewer_gate_selects():
@@ -123,22 +130,45 @@ async def test_current_facts_reads_the_pull_request_once_and_the_checks_once(rea
     assert got["check_state"] == "green" and "current_head" not in got
 
 
+def hundred(prefix):
+    return [run(f"{prefix}{n}") for n in range(100)]
+
+
 @pytest.mark.asyncio
 async def test_check_runs_are_read_page_by_page_until_the_total(reads):
-    reader = reads({f"{CHECKS}1": page(*[run(f"c{n}") for n in range(100)], total=101),
-                    f"{CHECKS}2": page(run("late", conclusion="failure"), total=101)})
-    got = await facts.current_facts(None, "o/r", None, {"head_sha": "h1"})
-    assert reader.paths == [f"repos/o/r/commits/h1/{CHECKS}1", f"repos/o/r/commits/h1/{CHECKS}2"]
+    pages = {f"{CHECKS}{n}": page(*hundred(f"p{n}-"), total=701) for n in range(1, 8)}
+    pages[f"{CHECKS}8"] = page(run("late", conclusion="failure"), total=701)
+    reader = reads({"/pulls/7": pull(), **pages})
+    got = await facts.current_facts(None, "o/r", 7, facts.pull_facts(pull()))
+    assert reader.paths[1:] == [f"repos/o/r/commits/h1/{CHECKS}{n}" for n in range(1, 9)]  # no page cap
     assert got["check_state"] == "failing"
 
 
 @pytest.mark.asyncio
-async def test_a_failed_page_or_too_many_pages_is_unreadable(reads):
-    reads({f"{CHECKS}1": page(*[run(f"c{n}") for n in range(100)], total=101)})
-    assert (await facts.current_facts(None, "o/r", None, {"head_sha": "h1"}))["check_state"] == "unreadable"
-    reader = reads({"/check-runs": page(*[run(f"c{n}") for n in range(100)], total=10_000)})
-    assert (await facts.current_facts(None, "o/r", None, {"head_sha": "h1"}))["check_state"] == "unreadable"
-    assert len(reader.paths) == facts.MAX_CHECK_PAGES
+@pytest.mark.parametrize("second", [None, page(total=101), {"check_runs": [run("x")]}])
+async def test_a_failed_empty_or_uncounted_page_before_the_total_is_unreadable(reads, second):
+    replies = {"/pulls/7": pull(), f"{CHECKS}1": page(*hundred("c"), total=101)}
+    if second is not None:
+        replies[f"{CHECKS}2"] = second
+    reader = reads(replies)
+    got = await facts.current_facts(None, "o/r", 7, facts.pull_facts(pull()))
+    assert got["check_state"] == "unreadable" and len(reader.paths) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_spent_read_budget_ends_the_paging_as_unreadable(monkeypatch):
+    left = [3]  # the PR read and two pages, then the budget is spent
+
+    async def budgeted(_runner, _repo, path):
+        if not left[0]:
+            return None, "budget_exhausted"
+        left[0] -= 1
+        body = pull() if "/pulls/" in path else page(*hundred("c"), total=10_000)
+        return GhResponse(200, {}, body), None
+
+    monkeypatch.setattr(poller, "gated_read", budgeted)
+    got = await facts.current_facts(None, "o/r", 7, facts.pull_facts(pull()))
+    assert got["check_state"] == "unreadable" and left == [0]
 
 
 @pytest.mark.asyncio
@@ -190,6 +220,15 @@ async def test_a_known_mergeable_state_still_reads_the_current_head(reads):
 
 
 @pytest.mark.asyncio
+async def test_an_open_pr_event_without_its_pull_request_read_is_unreadable(reads):
+    reader = reads({"/check-runs": page(run("ci"))})  # the checks read would have answered green
+    payload = facts.pull_facts(pull())
+    got = await facts.current_facts(None, "o/r", 7, payload)
+    assert got == {**payload, "check_state": "unreadable"}
+    assert reader.paths == ["repos/o/r/pulls/7"]
+
+
+@pytest.mark.asyncio
 async def test_failed_reads_leave_unknown_and_unreadable_never_raise(monkeypatch):
     async def broken(*_args):
         raise OSError("no gh")
@@ -207,7 +246,7 @@ async def test_a_held_back_read_is_unreadable(reads):
 
 @pytest.mark.asyncio
 async def test_enrichment_only_completes_open_pr_events(reads):
-    reader = reads({"/check-runs": page(run("ci"))})
+    reader = reads({"/pulls/7": pull(), "/check-runs": page(run("ci"))})
     opened = await facts.enriched(normalize("github", webhook("opened", mergeable=True), "pr.opened"), object())
     assert opened.facts["check_state"] == "green"
     closed = await facts.enriched(

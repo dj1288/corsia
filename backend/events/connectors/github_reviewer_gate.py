@@ -11,10 +11,10 @@ from infra.transient_read import (
     TRANSIENT_READ_INTERVAL_S,
     retry_transient_read,
 )
+from reviewer.gh_helpers import GREEN_CONCLUSIONS
 from reviewer.reviewer_categories import STATUS_CHECK_CONTEXT
 
 _REVIEWER_CHECK_NAME = STATUS_CHECK_CONTEXT
-_TERMINAL_GREEN_STATES = {"SUCCESS", "SKIPPED", "NEUTRAL"}
 _TRANSIENT_MERGEABLE = "UNKNOWN"
 
 
@@ -64,7 +64,7 @@ def checks_green(repo: str, pr_number: int, head_sha: str) -> bool | None:
 
     not_green = [
         check for check in non_reviewer_checks
-        if str(check.get("state") or "").upper() not in _TERMINAL_GREEN_STATES
+        if str(check.get("state") or "").upper() not in GREEN_CONCLUSIONS
     ]
     if not_green:
         log.info(
