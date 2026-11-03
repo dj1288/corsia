@@ -157,8 +157,8 @@ class HeadCheckAggregator:
                 facts["head_branch"] = branch
             if pr_number is not None:
                 facts["pr_number"] = pr_number
-            facts = await pr_facts.current_facts(self.runner, repo, pr_number, facts,
-                                                 held=conclusion == "action_required")
+            facts = await pr_facts.head_check_facts(self.runner, repo, pr_number, facts,
+                                                    held=conclusion == "action_required")
             try:
                 result = await self.sink.admit_event(event_type="github.head.checks_completed", facts=facts,
                     origin="connector", producer="github", event_id=_event_id(repo, head_sha, latest))

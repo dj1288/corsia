@@ -11,8 +11,9 @@ from infra.transient_read import (
     TRANSIENT_READ_INTERVAL_S,
     retry_transient_read,
 )
+from reviewer.reviewer_categories import STATUS_CHECK_CONTEXT
 
-_REVIEWER_CHECK_NAME = "qa/llm-reviewer"
+_REVIEWER_CHECK_NAME = STATUS_CHECK_CONTEXT
 _TERMINAL_GREEN_STATES = {"SUCCESS", "SKIPPED", "NEUTRAL"}
 _TRANSIENT_MERGEABLE = "UNKNOWN"
 

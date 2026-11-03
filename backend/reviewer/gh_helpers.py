@@ -102,21 +102,38 @@ def get_check_runs_for_sha(repo: str, head_sha: str) -> list[dict[str, str]] | N
         if isinstance(r, dict):
             runs.append(r)
 
-    newest_runs: dict[str, dict[str, Any]] = {}
-    for run in runs:
-        name = str(run.get("name") or "")
-        previous = newest_runs.get(name)
-        if previous is None or _check_run_recency(run) > _check_run_recency(previous):
-            newest_runs[name] = run
-
     return [
         {
             "name": str(run.get("name") or ""),
             # conclusion is null while in-progress; fall back to status
             "state": (run.get("conclusion") or run.get("status") or "").upper(),
         }
-        for run in newest_runs.values()
+        for run in newest_check_runs(runs)
     ]
+
+
+def newest_check_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select one run per check name: its latest attempt, by ``_check_run_recency``.
+
+    A re-run that has started but not completed is newer than the completed
+    run before it, so a pending re-run replaces an older result.
+    """
+    newest_runs: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        name = str(run.get("name") or "")
+        previous = newest_runs.get(name)
+        if previous is None or _check_run_recency(run) > _check_run_recency(previous):
+            newest_runs[name] = run
+    return list(newest_runs.values())
+
+
+def mergeable_state(value: Any) -> str:
+    """GitHub's ``true``/``false``/``null`` mergeable as ``MERGEABLE``/``CONFLICTING``/``UNKNOWN``."""
+    if value is True:
+        return "MERGEABLE"
+    if value is False:
+        return "CONFLICTING"
+    return "UNKNOWN"
 
 
 def _check_run_recency(run: dict[str, Any]) -> tuple[str, int]:
@@ -294,14 +311,6 @@ def get_pull_request_info(repo: str, pr_number: int) -> dict[str, Any] | None:
         log.warning("PR info missing head sha for %s#%d", repo, pr_number)
         return None
 
-    mergeable = data.get("mergeable")
-    if mergeable is True:
-        mergeable_state = "MERGEABLE"
-    elif mergeable is False:
-        mergeable_state = "CONFLICTING"
-    else:
-        mergeable_state = "UNKNOWN"
-
     labels = data.get("labels")
     if not isinstance(labels, list):
         labels = []
@@ -316,7 +325,7 @@ def get_pull_request_info(repo: str, pr_number: int) -> dict[str, Any] | None:
     # A repository name is None when GitHub omits it (a deleted fork).
     return {
         "number": number,
-        "mergeable": mergeable_state,
+        "mergeable": mergeable_state(data.get("mergeable")),
         "isDraft": draft,
         "baseRefName": base_ref,
         "baseRefOid": base_sha,

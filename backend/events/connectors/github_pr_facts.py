@@ -1,10 +1,11 @@
 """The current pull-request facts a GitHub review event carries.
 
 A webhook's ``pull_request`` object supplies most of them. The current head and
-mergeable state (a payload can be stale or redelivered), and the head's check
-state, are read once each through the repo-activity poller's budget and backoff gate. A failed
-read is never an error: the fact reads ``UNKNOWN`` or ``unreadable`` and the
-event still goes out.
+mergeable state (a payload can be stale or redelivered) are read once, and the
+head's check runs page by page, through the repo-activity poller's budget and
+backoff gate. A failed read is never an error: the fact reads ``UNKNOWN`` or
+``unreadable`` and the event still goes out. Check selection, the mergeable
+mapping, the reviewer's context and author origin come from their owners.
 """
 from __future__ import annotations
 
@@ -15,20 +16,23 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from events.connectors.github_content_facts import author_origin
 from events.connectors.github_label_events import label_names
-from events.connectors.github_ownership import is_own
+from reviewer.gh_helpers import mergeable_state, newest_check_runs
+from reviewer.reviewer_categories import STATUS_CHECK_CONTEXT
 
 log = logging.getLogger(__name__)
 
 # No head_repo: worker starts read that name as a request for a head tree (automation/worker_inputs.py).
 FACT_NAMES = ("head_sha", "trigger_head", "base_ref", "base_sha", "draft", "mergeable", "labels", "check_state")
+#: A settled head's ``head_sha`` is the head whose checks settled; ``current_head`` is the PR's live head.
+HEAD_CHECK_FACT_NAMES = (*FACT_NAMES, "current_head")
 #: Open-PR event types whose facts are completed by a read; a terminal event keeps what its payload holds.
 READ_TYPES = frozenset({"pr.opened", "pr.synchronize", "pr.ready_for_review", "pr.labeled", "pr.unlabeled"})
 UNREADABLE = "unreadable"
-#: The reviewer's own check never counts toward the state it is waiting on.
-EXCLUDED_CHECKS = "qa/llm-reviewer"
+#: A head with more check runs than this many pages of 100 reads ``unreadable``.
+MAX_CHECK_PAGES = 5
 _FAILING = frozenset({"failure", "timed_out", "cancelled", "startup_failure", "stale"})
-_GREEN = frozenset({"success", "skipped", "neutral"})
 
 
 def _object(value: Any) -> Mapping[str, Any]:
@@ -37,11 +41,6 @@ def _object(value: Any) -> Mapping[str, Any]:
 
 def _text(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
-
-
-def mergeable_state(value: Any) -> str:
-    """REST and webhook ``true``/``false``/``null`` as ``MERGEABLE``/``CONFLICTING``/``UNKNOWN``."""
-    return {True: "MERGEABLE", False: "CONFLICTING"}[value] if isinstance(value, bool) else "UNKNOWN"
 
 
 def pull_facts(pull: Mapping[str, Any]) -> dict[str, Any]:
@@ -59,23 +58,19 @@ def pull_facts(pull: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def check_state(runs: list[Any], held: bool = False) -> str:
-    """The head's state from its newest run per check name; ``held`` is a suite waiting for approval."""
-    newest: dict[str, Mapping[str, Any]] = {}
-    for run in map(_object, runs):
-        name = str(run.get("name") or "")
-        if name.startswith(EXCLUDED_CHECKS):
-            continue
-        order = (str(run.get("started_at") or ""), int(run.get("id") or 0))
-        old = newest.get(name)
-        if old is None or order > (str(old.get("started_at") or ""), int(old.get("id") or 0)):
-            newest[name] = run
-    conclusions = {str(run.get("conclusion") or "") for run in newest.values() if run.get("status") == "completed"}
+    """The head's state from its newest run per check name; ``held`` is a suite waiting for approval.
+
+    The reviewer's own checks (every context it posts starts with its name) never count.
+    """
+    newest = [run for run in newest_check_runs([run for run in runs if isinstance(run, dict)])
+              if not str(run.get("name") or "").startswith(STATUS_CHECK_CONTEXT)]
+    conclusions = {str(run.get("conclusion") or "") for run in newest if run.get("status") == "completed"}
     # A head waiting for a maintainer waits for them first, whatever else failed.
     if held or "action_required" in conclusions:
         return "action_required"
     if conclusions & _FAILING:
         return "failing"
-    if any(run.get("status") != "completed" for run in newest.values()) or not newest:
+    if any(run.get("status") != "completed" for run in newest) or not newest:
         return "pending"
     return "green"
 
@@ -91,23 +86,63 @@ async def _read(runner: Any, repo: str, path: str) -> Any:
     return response.body if response is not None and response.status == 200 else None
 
 
-async def current_facts(
+async def _pull(runner: Any, repo: str, number: int) -> Mapping[str, Any] | None:
+    body = await _read(runner, repo, f"repos/{repo}/pulls/{number}")
+    return body if isinstance(body, Mapping) else None
+
+
+async def _check_state(runner: Any, repo: str, sha: Any, held: bool = False) -> str:
+    """``sha``'s check state from every page of its runs; a failed page, or too many, is ``unreadable``."""
+    if not isinstance(sha, str) or not sha:
+        return UNREADABLE
+    runs: list[Any] = []
+    for page in range(1, MAX_CHECK_PAGES + 1):
+        body = _object(await _read(runner, repo, f"repos/{repo}/commits/{sha}/check-runs?per_page=100&page={page}"))
+        batch, total = body.get("check_runs"), body.get("total_count")
+        if not isinstance(batch, list) or not isinstance(total, int):
+            return UNREADABLE
+        runs += batch
+        if len(runs) >= total:
+            return check_state(runs, held)
+    return UNREADABLE
+
+
+async def current_facts(runner: Any, repo: str, number: int | None, facts: Mapping[str, Any]) -> dict[str, Any]:
+    """An open-PR event's ``facts`` completed: ``head_sha`` becomes the PR's live head, with its check state."""
+    out = dict(facts)
+    out.setdefault("mergeable", "UNKNOWN")
+    body = await _pull(runner, repo, number) if number is not None else None
+    if body is not None:
+        out.update({key: value for key, value in pull_facts(body).items() if key != "trigger_head"})
+    out["check_state"] = await _check_state(runner, repo, out.get("head_sha"))
+    return out
+
+
+async def head_check_facts(
     runner: Any, repo: str, number: int | None, facts: Mapping[str, Any], *, held: bool = False,
 ) -> dict[str, Any]:
-    """``facts`` completed: one PR read for the current head and mergeable state, one checks read for that head."""
+    """A settled head's ``facts`` completed; ``head_sha`` stays the head whose checks settled.
+
+    The PR read adds ``current_head``, the PR's live head, which may already have
+    moved on. When that read fails, ``check_state`` is ``unreadable``.
+    """
     out = dict(facts)
     out.setdefault("mergeable", "UNKNOWN")
     if number is not None:
-        body = await _read(runner, repo, f"repos/{repo}/pulls/{number}")
-        if isinstance(body, Mapping):
-            out.update({key: value for key, value in pull_facts(body).items() if key != "trigger_head"})
-            login = _text(_object(body.get("user")).get("login"))
-            if login and "author_origin" not in out:  # a head-checks event: whose pull request it is
-                out["author_origin"] = "inside" if is_own(login) else "outside"
-    sha = out.get("head_sha")
-    body = await _read(runner, repo, f"repos/{repo}/commits/{sha}/check-runs?per_page=100") if sha else None
-    runs = _object(body).get("check_runs")
-    out["check_state"] = check_state(runs, held) if isinstance(runs, list) else UNREADABLE
+        body = await _pull(runner, repo, number)
+        if body is None:
+            out["check_state"] = UNREADABLE
+            return out
+        live = pull_facts(body)
+        live.pop("trigger_head", None)
+        current = live.pop("head_sha", None)
+        if current is not None:
+            out["current_head"] = current
+        out.update(live)
+        login = _text(_object(body.get("user")).get("login"))
+        if login:
+            out["author_origin"] = author_origin(login)
+    out["check_state"] = await _check_state(runner, repo, out.get("head_sha"), held)
     return out
 
 

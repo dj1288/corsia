@@ -79,7 +79,7 @@ async def test_a_webhook_repository_emits_through_the_broker(monkeypatch):
     agg = checks.HeadCheckAggregator(GithubReadBroker(run), sink, sleep=lambda _: asyncio.sleep(0))
     agg.observe(payload())
     await finish(agg)
-    assert calls == ["repos/o/r/commits/abc/check-suites", "repos/o/r/commits/abc/check-runs?per_page=100"]
+    assert calls == ["repos/o/r/commits/abc/check-suites", "repos/o/r/commits/abc/check-runs?per_page=100&page=1"]
     assert sink.events[0]["event_type"] == "github.head.checks_completed"
     assert sink.events[0]["facts"]["trigger_head"] == "abc"
     assert sink.events[0]["facts"]["check_state"] == "unreadable"
@@ -302,7 +302,7 @@ async def test_a_held_suite_with_no_runs_arrives_as_action_required(monkeypatch)
             return held, None
         if "/pulls/" in path:
             return GhResponse(200, {}, {"head": {"sha": "abc"}, "base": {"ref": "dev"}, "mergeable": None}), None
-        return GhResponse(200, {}, {"check_runs": []}), None
+        return GhResponse(200, {}, {"total_count": 0, "check_runs": []}), None
 
     monkeypatch.setattr(poller, "gated_read", read)
     agg = aggregator(sink)
@@ -311,4 +311,31 @@ async def test_a_held_suite_with_no_runs_arrives_as_action_required(monkeypatch)
     facts = sink.events[0]["facts"]
     assert facts["conclusion"] == "action_required" and facts["check_state"] == "action_required"
     assert facts["pr_number"] == 7 and facts["mergeable"] == "UNKNOWN" and facts["trigger_head"] == "abc"
-    assert len(paths) == 3
+    assert facts["current_head"] == "abc" and len(paths) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_head_whose_pull_request_moved_on_is_still_named_by_its_settled_head(monkeypatch):
+    failed = response()
+    failed.body["check_suites"][0]["conclusion"] = "failure"
+    paths, sink = [], Sink()
+
+    async def read(_runner, _repo, path):
+        paths.append(path)
+        if path.endswith("check-suites"):
+            return failed, None
+        if "/pulls/" in path:  # a push landed after the suites settled on abc
+            return GhResponse(200, {}, {"head": {"sha": "new"}, "base": {"ref": "dev"}, "mergeable": True}), None
+        runs = [{"name": "ci", "status": "completed", "conclusion": "failure", "id": 1}]
+        return GhResponse(200, {}, {"total_count": 1, "check_runs": runs}), None
+
+    monkeypatch.setattr(poller, "gated_read", read)
+    agg = aggregator(sink)
+    agg.observe(payload("abc"), {"number": 7})
+    await finish(agg)
+    event = sink.events[0]
+    assert event["facts"]["head_sha"] == "abc" and event["facts"]["trigger_head"] == "abc"
+    assert event["facts"]["current_head"] == "new" and event["facts"]["conclusion"] == "failure"
+    assert event["facts"]["check_state"] == "failing"
+    assert paths[-1] == "repos/o/r/commits/abc/check-runs?per_page=100&page=1"
+    assert event["event_id"] == checks._event_id("o/r", "abc", failed.body["check_suites"])
