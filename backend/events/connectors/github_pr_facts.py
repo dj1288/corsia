@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from events.connectors.github_label_events import label_names
+from events.connectors.github_ownership import is_own
 
 log = logging.getLogger(__name__)
 
@@ -100,6 +101,9 @@ async def current_facts(
         body = await _read(runner, repo, f"repos/{repo}/pulls/{number}")
         if isinstance(body, Mapping):
             out.update({key: value for key, value in pull_facts(body).items() if key != "trigger_head"})
+            login = _text(_object(body.get("user")).get("login"))
+            if login and "author_origin" not in out:  # a head-checks event: whose pull request it is
+                out["author_origin"] = "inside" if is_own(login) else "outside"
     sha = out.get("head_sha")
     body = await _read(runner, repo, f"repos/{repo}/commits/{sha}/check-runs?per_page=100") if sha else None
     runs = _object(body).get("check_runs")

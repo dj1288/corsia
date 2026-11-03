@@ -264,7 +264,7 @@ _PR_LABEL_FILTERABLE = (*_PR_FILTERABLE, "label", "actor", "at")
 _ISSUE_FILTERABLE = ("repo", "issue_number", "label", "labels", "actor", "at",
                      "minutes_since_opened", "state_reason", "author", "author_origin", "item_version")
 _CONTENT_FILTERABLE = ("repo", "author", "author_origin", "item_version")
-_HEAD_CHECKS_FILTERABLE = ("repo", "head_branch", "pr_number", "conclusion", *_PR_FACTS)
+_HEAD_CHECKS_FILTERABLE = ("repo", "head_branch", "pr_number", "conclusion", "author_origin", *_PR_FACTS)
 _CHECK_FILTERABLE = ("repo", "branch", "head_sha", "check_suite_id", "conclusion")
 
 MANIFEST = register(ConnectorManifest(

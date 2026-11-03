@@ -34,8 +34,8 @@ def test_mergeable_is_a_string_enum_never_a_boolean(value, state):
 
 def test_pull_facts_come_from_the_pull_request_object():
     got = facts.pull_facts(pull())
-    assert got == {"head_sha": "h1", "trigger_head": "h1", "base_ref": "dev", "base_sha": "b1", "draft": False, "mergeable": "UNKNOWN",
-                   "labels": ["a", "b"]}
+    assert got == {"head_sha": "h1", "trigger_head": "h1", "base_ref": "dev", "base_sha": "b1", "draft": False,
+                   "mergeable": "UNKNOWN", "labels": ["a", "b"]}
 
 
 def test_no_fact_asks_a_started_worker_for_a_head_tree():
@@ -100,6 +100,18 @@ async def test_current_facts_reads_the_pull_request_once_and_the_checks_once(rea
     assert reader.paths == ["repos/o/r/pulls/7", "repos/o/r/commits/h2/check-runs?per_page=100"]
     assert got["mergeable"] == "MERGEABLE" and got["head_sha"] == "h2" and got["trigger_head"] == "h1"
     assert got["check_state"] == "green"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("own, origin", [(True, "inside"), (False, "outside")])
+async def test_a_head_checks_event_learns_whose_pull_request_it_is(reads, monkeypatch, own, origin):
+    monkeypatch.setattr(facts, "is_own", lambda login: own and login == "someone")
+    reads({"/pulls/7": pull(), "/check-runs": {"check_runs": []}})
+    got = await facts.current_facts(None, "o/r", 7, {"repo": "o/r", "head_sha": "h1"})
+    assert got["author_origin"] == origin
+    kept = await facts.current_facts(None, "o/r", 7, {"head_sha": "h1", "author_origin": "outside"})
+    assert kept["author_origin"] == "outside"  # a PR event keeps its own author's origin
+    assert "author_origin" in MANIFEST.decl("head.checks_completed").filterable_fields
 
 
 @pytest.mark.asyncio
