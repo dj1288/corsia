@@ -188,7 +188,7 @@ GITHUB_PR = _add(Scenario(
     connector="github", internal_event="pr.opened",
     raw_payload=_github_pr_payload("o/r", 7),
     identity_facts=("repo", "pr_number", "action"),
-    expected_facts={"repo": "o/r", "pr_number": 7, "branch": "dev", "sha": "abc123"},
+    expected_facts={"repo": "o/r", "pr_number": 7, "branch": "dev", "head_sha": "abc123"},
     relationships=(),
     artifact_ref={"integration": "github", "type": "pull-request", "external_id": "o/r#7"},
     event_class="actionable",
